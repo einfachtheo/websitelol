@@ -1,7 +1,14 @@
 "use server";
 
+import fs from "fs/promises";
+import path from "path";
 import { unstable_noStore as noStore } from "next/cache";
-import { subDays, startOfDay, format, eachDayOfInterval } from "date-fns";
+import {
+  subDays,
+  startOfDay,
+  format,
+  eachDayOfInterval,
+} from "date-fns";
 import { sendWebhook } from "./logging";
 import type {
   Product,
@@ -19,26 +26,95 @@ import type {
   DailyWebhookCreationsData,
 } from "./types";
 
-/* ------------------------------------------------------------------ */
-/* IN-MEMORY STORAGE (REPLACES FILE SYSTEM)                           */
-/* ------------------------------------------------------------------ */
+const dataDir = path.join(process.cwd(), "data");
 
-const db = {
-  products: [] as Product[],
-  licenses: [] as License[],
-  logs: [] as ValidationLog[],
-  botLogs: [] as BotLog[],
-  vouchers: [] as Voucher[],
-  blacklist: { ips: [], hwids: [], discordIds: [] } as Blacklist,
-  settings: null as Settings | null,
-};
+/* ---------------- FILE HELPERS ---------------- */
 
-/* ------------------------------------------------------------------ */
-/* HELPERS                                                            */
-/* ------------------------------------------------------------------ */
+async function ensureDir() {
+  try {
+    await fs.access(dataDir);
+  } catch {
+    await fs.mkdir(dataDir, { recursive: true });
+  }
+}
 
-function getSettingsDefault(): Settings {
-  return {
+async function readFile<T>(filename: string, defaultValue: T): Promise<T> {
+  await ensureDir();
+  const filePath = path.join(dataDir, filename);
+
+  try {
+    const data = await fs.readFile(filePath, "utf-8");
+    if (!data) return defaultValue;
+    return JSON.parse(data) as T;
+  } catch {
+    await writeFile(filename, defaultValue);
+    return defaultValue;
+  }
+}
+
+async function writeFile<T>(filename: string, data: T): Promise<void> {
+  await ensureDir();
+  const filePath = path.join(dataDir, filename);
+  await fs.writeFile(filePath, JSON.stringify(data, null, 2), "utf-8");
+}
+
+/* ---------------- BASIC CRUD ---------------- */
+
+export async function getProducts() {
+  noStore();
+  return readFile<Product[]>("products.json", []);
+}
+
+export async function saveProducts(products: Product[]) {
+  return writeFile("products.json", products);
+}
+
+export async function getLicenses() {
+  noStore();
+  return readFile<License[]>("licenses.json", []);
+}
+
+export async function saveLicenses(data: License[]) {
+  return writeFile("licenses.json", data);
+}
+
+export async function getLogs() {
+  noStore();
+  return readFile<ValidationLog[]>("logs.json", []);
+}
+
+export async function saveLogs(data: ValidationLog[]) {
+  return writeFile("logs.json", data);
+}
+
+export async function getVouchers() {
+  noStore();
+  return readFile<Voucher[]>("vouchers.json", []);
+}
+
+export async function saveVouchers(data: Voucher[]) {
+  return writeFile("vouchers.json", data);
+}
+
+export async function getBlacklist() {
+  noStore();
+  return readFile<Blacklist>("blacklist.json", {
+    ips: [],
+    hwids: [],
+    discordIds: [],
+  });
+}
+
+export async function saveBlacklist(data: Blacklist) {
+  return writeFile("blacklist.json", data);
+}
+
+/* ---------------- SETTINGS ---------------- */
+
+export async function getSettings(): Promise<Settings> {
+  noStore();
+
+  const defaults: Settings = {
     apiKey: "",
     panelUrl: "",
     adminApiEnabled: false,
@@ -63,43 +139,11 @@ function getSettingsDefault(): Settings {
         enabled: true,
         message: "License key is valid",
       },
-      license: {
-        enabled: false,
-        fields: {
-          license_key: true,
-          status: true,
-          expires_at: true,
-          issue_date: true,
-          max_ips: true,
-          used_ips: true,
-        },
-      },
-      customer: {
-        enabled: false,
-        fields: {
-          id: true,
-          discord_id: true,
-          customer_since: true,
-        },
-      },
-      product: {
-        enabled: false,
-        fields: {
-          id: true,
-          name: true,
-          enabled: true,
-        },
-      },
+      license: { enabled: false, fields: {} },
+      customer: { enabled: false, fields: {} },
+      product: { enabled: false, fields: {} },
     },
     builtByBitWebhookSecret: {
-      enabled: false,
-      secret: "",
-      disableIpProtection: false,
-      maxIps: 1,
-      enableHwidProtection: false,
-      maxHwids: 1,
-    },
-    builtByBitPlaceholder: {
       enabled: false,
       secret: "",
       disableIpProtection: false,
@@ -113,25 +157,10 @@ function getSettingsDefault(): Settings {
       guildId: "",
       botSecret: "",
       adminIds: [],
-      commands: {
-        viewUser: true,
-        checkLicenses: true,
-        searchLicense: true,
-        deactivate: true,
-        createLicense: true,
-        renewLicense: true,
-        profile: true,
-        userLicenses: true,
-        manageLicense: true,
-        redeem: true,
-        linkBuiltbybit: true,
-      },
+      commands: {},
       presence: {
         status: "online",
-        activity: {
-          type: "Watching",
-          name: "licenses",
-        },
+        activity: { type: "Watching", name: "licenses" },
       },
     },
     logging: {
@@ -144,143 +173,16 @@ function getSettingsDefault(): Settings {
       logBuiltByBit: true,
     },
   };
+
+  const data = await readFile<Settings>("settings.json", defaults);
+  return { ...defaults, ...data };
 }
 
-/* ------------------------------------------------------------------ */
-/* PRODUCTS                                                           */
-/* ------------------------------------------------------------------ */
-
-export async function getProducts(): Promise<Product[]> {
-  noStore();
-  return db.products;
+export async function saveSettings(data: Settings) {
+  return writeFile("settings.json", data);
 }
 
-export async function saveProducts(products: Product[]) {
-  db.products = products;
-}
-
-/* ------------------------------------------------------------------ */
-/* LICENSES                                                           */
-/* ------------------------------------------------------------------ */
-
-export async function getLicenses(): Promise<License[]> {
-  noStore();
-  return db.licenses;
-}
-
-export async function saveLicenses(licenses: License[]) {
-  db.licenses = licenses;
-}
-
-/* ------------------------------------------------------------------ */
-/* LOGS                                                               */
-/* ------------------------------------------------------------------ */
-
-export async function getLogs(): Promise<ValidationLog[]> {
-  noStore();
-  return db.logs;
-}
-
-export async function saveLogs(logs: ValidationLog[]) {
-  db.logs = logs;
-}
-
-export async function addLog(log: Omit<ValidationLog, "id">) {
-  const logs = await getLogs();
-  const newLog: ValidationLog = {
-    ...log,
-    id: crypto.randomUUID(),
-  };
-  logs.unshift(newLog);
-  db.logs = logs.slice(0, 500);
-}
-
-/* ------------------------------------------------------------------ */
-/* BOT LOGS                                                           */
-/* ------------------------------------------------------------------ */
-
-export async function getBotLogs(): Promise<BotLog[]> {
-  noStore();
-  return db.botLogs;
-}
-
-export async function saveBotLogs(logs: BotLog[]) {
-  db.botLogs = logs;
-}
-
-export async function logBotCommand(command: string, userId: string) {
-  const logs = await getBotLogs();
-
-  logs.unshift({
-    command,
-    userId,
-    timestamp: new Date().toISOString(),
-  });
-
-  db.botLogs = logs.slice(0, 1000);
-
-  const settings = await getSettings();
-
-  if (settings.logging.enabled && settings.logging.logBotCommands) {
-    await sendWebhook({
-      title: "Bot Command Executed",
-      description: `User \`${userId}\` executed command.`,
-      timestamp: new Date().toISOString(),
-      fields: [
-        { name: "Command", value: `/${command}`, inline: true },
-        { name: "User", value: userId, inline: true },
-      ],
-    });
-  }
-}
-
-/* ------------------------------------------------------------------ */
-/* VOUCHERS                                                           */
-/* ------------------------------------------------------------------ */
-
-export async function getVouchers(): Promise<Voucher[]> {
-  noStore();
-  return db.vouchers;
-}
-
-export async function saveVouchers(vouchers: Voucher[]) {
-  db.vouchers = vouchers;
-}
-
-/* ------------------------------------------------------------------ */
-/* SETTINGS                                                           */
-/* ------------------------------------------------------------------ */
-
-export async function getSettings(): Promise<Settings> {
-  noStore();
-
-  if (!db.settings) {
-    db.settings = getSettingsDefault();
-  }
-
-  return db.settings;
-}
-
-export async function saveSettings(settings: Settings) {
-  db.settings = settings;
-}
-
-/* ------------------------------------------------------------------ */
-/* BLACKLIST                                                          */
-/* ------------------------------------------------------------------ */
-
-export async function getBlacklist(): Promise<Blacklist> {
-  noStore();
-  return db.blacklist;
-}
-
-export async function saveBlacklist(blacklist: Blacklist) {
-  db.blacklist = blacklist;
-}
-
-/* ------------------------------------------------------------------ */
-/* DASHBOARD STATS                                                    */
-/* ------------------------------------------------------------------ */
+/* ---------------- DASHBOARD ---------------- */
 
 export async function getDashboardStats(): Promise<DashboardStats> {
   noStore();
@@ -290,110 +192,32 @@ export async function getDashboardStats(): Promise<DashboardStats> {
   const logs = await getLogs();
 
   const now = new Date();
-  const sevenDaysAgo = subDays(now, 6);
-  const fourteenDaysAgo = subDays(now, 13);
-
-  const validationsLast7 = logs.filter(
-    (l) => new Date(l.timestamp) >= startOfDay(sevenDaysAgo)
-  ).length;
-
-  const validationsPrev7 = logs.filter((l) => {
-    const d = new Date(l.timestamp);
-    return (
-      d >= startOfDay(fourteenDaysAgo) && d < startOfDay(sevenDaysAgo)
-    );
-  }).length;
-
-  let validationChangePercent = 0;
-
-  if (validationsPrev7 > 0) {
-    validationChangePercent =
-      ((validationsLast7 - validationsPrev7) / validationsPrev7) * 100;
-  }
-
   const interval = {
-    start: startOfDay(sevenDaysAgo),
+    start: startOfDay(subDays(now, 6)),
     end: now,
   };
 
-  const activeLicenses = licenses.filter(
-    (l) => l.status === "active"
-  ).length;
+  const activeLicenses = licenses.filter((l) => l.status === "active").length;
 
-  const dailyNewUsers: DailyNewUsersData[] = eachDayOfInterval(
-    interval
-  ).map((d) => ({
-    date: format(d, "MMM d"),
-    users: 0,
-  }));
-
-  const newLicenseDistribution: NewLicenseDistributionData[] = [
-    { name: "New Customers", value: 0, fill: "hsl(var(--chart-1))" },
-    { name: "Existing Customers", value: 0, fill: "hsl(var(--chart-2))" },
-  ];
-
-  const dailyWebhookCreations: DailyWebhookCreationsData[] =
-    eachDayOfInterval(interval).map((d) => ({
+  const dailyNewUsers: DailyNewUsersData[] = eachDayOfInterval(interval).map(
+    (d) => ({
       date: format(d, "MMM d"),
-      creations: 0,
-    }));
+      users: 0,
+    })
+  );
 
   return {
     totalProducts: products.length,
     totalLicenses: licenses.length,
     activeLicenses,
     totalValidations: logs.length,
-    successfulValidations: logs.length,
-    validationChangePercent,
+    successfulValidations: logs.filter((l) => l.status === "success").length,
+    validationChangePercent: 0,
     dailyNewUsers,
-    newLicenseDistribution,
-    dailyWebhookCreations,
+    newLicenseDistribution: [
+      { name: "New Customers", value: 0, fill: "#000" },
+      { name: "Existing Customers", value: 0, fill: "#999" },
+    ],
+    dailyWebhookCreations: [],
   };
-}
-
-/* ------------------------------------------------------------------ */
-/* USERS                                                              */
-/* ------------------------------------------------------------------ */
-
-export async function getAllUsers(): Promise<Customer[]> {
-  noStore();
-
-  const licenses = await getLicenses();
-  const ids = new Set<string>();
-
-  licenses.forEach((l) => {
-    if (l.discordId) ids.add(l.discordId);
-  });
-
-  return Array.from(ids).map((id) => ({
-    id,
-    discordId: id,
-    discordUsername: id,
-    avatarUrl: "",
-    isOwner: true,
-    ownedLicenseCount: licenses.filter((l) => l.discordId === id).length,
-    subUserLicenseCount: 0,
-  }));
-}
-
-/* ------------------------------------------------------------------ */
-/* COMMAND USAGE                                                      */
-/* ------------------------------------------------------------------ */
-
-export async function getCommandUsageData(): Promise<DailyCommandUsage[]> {
-  noStore();
-
-  const botLogs = await getBotLogs();
-
-  const last7Days = eachDayOfInterval({
-    start: startOfDay(subDays(new Date(), 6)),
-    end: startOfDay(new Date()),
-  });
-
-  return last7Days.map((day) => ({
-    date: format(day, "MMM d"),
-    commands: botLogs.filter(
-      (l) => format(new Date(l.timestamp), "MMM d") === format(day, "MMM d")
-    ).length,
-  }));
 }
