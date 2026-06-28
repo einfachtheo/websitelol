@@ -1,15 +1,11 @@
 "use server";
 
-import fs from "fs/promises";
-import path from "path";
+import { kv } from "@vercel/kv";
 import { unstable_noStore as noStore } from "next/cache";
-import {
-  subDays,
-  startOfDay,
-  format,
-  eachDayOfInterval,
-} from "date-fns";
+import { subDays, startOfDay, format, eachDayOfInterval } from "date-fns";
 import { sendWebhook } from "./logging";
+import { v4 as uuid } from "uuid";
+
 import type {
   Product,
   License,
@@ -18,87 +14,199 @@ import type {
   Blacklist,
   Customer,
   Voucher,
-  DailyNewUsersData,
-  NewLicenseDistributionData,
   DashboardStats,
   BotLog,
-  DailyCommandUsage,
-  DailyWebhookCreationsData,
 } from "./types";
 
-const dataDir = path.join(process.cwd(), "data");
+/* -----------------------------
+   HELPERS (KV STORAGE)
+------------------------------*/
 
-/* ---------------- FILE HELPERS ---------------- */
-
-async function ensureDir() {
-  try {
-    await fs.access(dataDir);
-  } catch {
-    await fs.mkdir(dataDir, { recursive: true });
-  }
+async function get<T>(key: string, fallback: T): Promise<T> {
+  const data = await kv.get<T>(key);
+  return data ?? fallback;
 }
 
-async function readFile<T>(filename: string, defaultValue: T): Promise<T> {
-  await ensureDir();
-  const filePath = path.join(dataDir, filename);
-
-  try {
-    const data = await fs.readFile(filePath, "utf-8");
-    if (!data) return defaultValue;
-    return JSON.parse(data) as T;
-  } catch {
-    await writeFile(filename, defaultValue);
-    return defaultValue;
-  }
+async function set<T>(key: string, value: T) {
+  await kv.set(key, value);
 }
 
-async function writeFile<T>(filename: string, data: T): Promise<void> {
-  await ensureDir();
-  const filePath = path.join(dataDir, filename);
-  await fs.writeFile(filePath, JSON.stringify(data, null, 2), "utf-8");
-}
-
-/* ---------------- BASIC CRUD ---------------- */
+/* -----------------------------
+   PRODUCTS
+------------------------------*/
 
 export async function getProducts() {
   noStore();
-  return readFile<Product[]>("products.json", []);
+  return await get<Product[]>("products", []);
 }
 
 export async function saveProducts(products: Product[]) {
-  return writeFile("products.json", products);
+  await set("products", products);
 }
+
+/* -----------------------------
+   LICENSES
+------------------------------*/
 
 export async function getLicenses() {
   noStore();
-  return readFile<License[]>("licenses.json", []);
+  return await get<License[]>("licenses", []);
 }
 
-export async function saveLicenses(data: License[]) {
-  return writeFile("licenses.json", data);
+export async function saveLicenses(licenses: License[]) {
+  await set("licenses", licenses);
 }
+
+/* -----------------------------
+   LOGS
+------------------------------*/
 
 export async function getLogs() {
   noStore();
-  return readFile<ValidationLog[]>("logs.json", []);
+  return await get<ValidationLog[]>("logs", []);
 }
 
-export async function saveLogs(data: ValidationLog[]) {
-  return writeFile("logs.json", data);
+export async function saveLogs(logs: ValidationLog[]) {
+  await set("logs", logs);
 }
 
-export async function getVouchers() {
+export async function addLog(log: Omit<ValidationLog, "id">) {
+  const logs = await getLogs();
+
+  const newLog: ValidationLog = {
+    ...log,
+    id: uuid(),
+  };
+
+  logs.unshift(newLog);
+
+  await saveLogs(logs.slice(0, 500));
+}
+
+/* -----------------------------
+   BOT LOGS
+------------------------------*/
+
+export async function getBotLogs() {
   noStore();
-  return readFile<Voucher[]>("vouchers.json", []);
+  return await get<BotLog[]>("bot_logs", []);
 }
 
-export async function saveVouchers(data: Voucher[]) {
-  return writeFile("vouchers.json", data);
+export async function saveBotLogs(logs: BotLog[]) {
+  await set("bot_logs", logs);
 }
 
-export async function getBlacklist() {
+export async function logBotCommand(command: string, userId: string) {
+  const logs = await getBotLogs();
+
+  logs.unshift({
+    command,
+    userId,
+    timestamp: new Date().toISOString(),
+  });
+
+  await saveBotLogs(logs.slice(0, 1000));
+
+  const settings = await getSettings();
+
+  if (settings.logging?.enabled && settings.logging?.logBotCommands) {
+    await sendWebhook({
+      title: "Bot Command",
+      description: `${userId} used /${command}`,
+      timestamp: new Date().toISOString(),
+    });
+  }
+}
+
+/* -----------------------------
+   SETTINGS
+------------------------------*/
+
+const defaultSettings: Settings = {
+  apiKey: "",
+  panelUrl: "",
+  adminApiEnabled: false,
+  clientPanel: {
+    enabled: false,
+    accentColor: "#3b82f6",
+  },
+  adminApiEndpoints: {
+    getLicenses: true,
+    createLicense: true,
+    updateLicense: true,
+    deleteLicense: true,
+    updateIdentities: true,
+    renewLicense: true,
+    manageTeam: true,
+    addSubUser: true,
+    removeSubUser: true,
+  },
+  validationResponse: {
+    requireDiscordId: true,
+    customSuccessMessage: {
+      enabled: true,
+      message: "License key is valid",
+    },
+    license: { enabled: false, fields: {} as any },
+    customer: { enabled: false, fields: {} as any },
+    product: { enabled: false, fields: {} as any },
+  },
+  builtByBitWebhookSecret: {
+    enabled: false,
+    secret: "",
+    disableIpProtection: false,
+    maxIps: 1,
+    enableHwidProtection: false,
+    maxHwids: 1,
+  },
+  builtByBitPlaceholder: {
+    enabled: false,
+    secret: "",
+    disableIpProtection: false,
+    maxIps: 1,
+    enableHwidProtection: false,
+    maxHwids: 1,
+  },
+  discordBot: {
+    enabled: false,
+    clientId: "",
+    guildId: "",
+    botSecret: "",
+    adminIds: [],
+    commands: {} as any,
+    presence: {
+      status: "online",
+      activity: { type: "Watching", name: "licenses" },
+    },
+  },
+  logging: {
+    enabled: false,
+    webhookUrl: "",
+    logLicenseCreations: true,
+    logLicenseUpdates: true,
+    logBotCommands: true,
+    logBlacklistActions: true,
+    logBuiltByBit: true,
+  },
+};
+
+export async function getSettings(): Promise<Settings> {
   noStore();
-  return readFile<Blacklist>("blacklist.json", {
+  const settings = await get<Settings>("settings", defaultSettings);
+  return { ...defaultSettings, ...settings };
+}
+
+export async function saveSettings(settings: Settings) {
+  await set("settings", settings);
+}
+
+/* -----------------------------
+   BLACKLIST
+------------------------------*/
+
+export async function getBlacklist(): Promise<Blacklist> {
+  noStore();
+  return await get("blacklist", {
     ips: [],
     hwids: [],
     discordIds: [],
@@ -106,83 +214,12 @@ export async function getBlacklist() {
 }
 
 export async function saveBlacklist(data: Blacklist) {
-  return writeFile("blacklist.json", data);
+  await set("blacklist", data);
 }
 
-/* ---------------- SETTINGS ---------------- */
-
-export async function getSettings(): Promise<Settings> {
-  noStore();
-
-  const defaults: Settings = {
-    apiKey: "",
-    panelUrl: "",
-    adminApiEnabled: false,
-    clientPanel: {
-      enabled: false,
-      accentColor: "#3b82f6",
-    },
-    adminApiEndpoints: {
-      getLicenses: true,
-      createLicense: true,
-      updateLicense: true,
-      deleteLicense: true,
-      updateIdentities: true,
-      renewLicense: true,
-      manageTeam: true,
-      addSubUser: true,
-      removeSubUser: true,
-    },
-    validationResponse: {
-      requireDiscordId: true,
-      customSuccessMessage: {
-        enabled: true,
-        message: "License key is valid",
-      },
-      license: { enabled: false, fields: {} },
-      customer: { enabled: false, fields: {} },
-      product: { enabled: false, fields: {} },
-    },
-    builtByBitWebhookSecret: {
-      enabled: false,
-      secret: "",
-      disableIpProtection: false,
-      maxIps: 1,
-      enableHwidProtection: false,
-      maxHwids: 1,
-    },
-    discordBot: {
-      enabled: false,
-      clientId: "",
-      guildId: "",
-      botSecret: "",
-      adminIds: [],
-      commands: {},
-      presence: {
-        status: "online",
-        activity: { type: "Watching", name: "licenses" },
-      },
-    },
-    logging: {
-      enabled: false,
-      webhookUrl: "",
-      logLicenseCreations: true,
-      logLicenseUpdates: true,
-      logBotCommands: true,
-      logBlacklistActions: true,
-      logBuiltByBit: true,
-    },
-  };
-
-  const data = await readFile<Settings>("settings.json", defaults);
-  return { ...defaults, ...data };
-}
-
-export async function saveSettings(data: Settings) {
-  return writeFile("settings.json", data);
-}
-
-/* ---------------- DASHBOARD ---------------- */
+/* -----------------------------
+   DASHBOARD (basic safe version)
+------------------------------*/
 
 export async function getDashboardStats(): Promise<DashboardStats> {
   noStore();
@@ -191,33 +228,20 @@ export async function getDashboardStats(): Promise<DashboardStats> {
   const licenses = await getLicenses();
   const logs = await getLogs();
 
-  const now = new Date();
-  const interval = {
-    start: startOfDay(subDays(now, 6)),
-    end: now,
-  };
+  const totalValidations = logs.length;
+  const successfulValidations = logs.filter((l) => l.status === "success").length;
 
   const activeLicenses = licenses.filter((l) => l.status === "active").length;
-
-  const dailyNewUsers: DailyNewUsersData[] = eachDayOfInterval(interval).map(
-    (d) => ({
-      date: format(d, "MMM d"),
-      users: 0,
-    })
-  );
 
   return {
     totalProducts: products.length,
     totalLicenses: licenses.length,
     activeLicenses,
-    totalValidations: logs.length,
-    successfulValidations: logs.filter((l) => l.status === "success").length,
+    totalValidations,
+    successfulValidations,
     validationChangePercent: 0,
-    dailyNewUsers,
-    newLicenseDistribution: [
-      { name: "New Customers", value: 0, fill: "#000" },
-      { name: "Existing Customers", value: 0, fill: "#999" },
-    ],
+    dailyNewUsers: [],
+    newLicenseDistribution: [],
     dailyWebhookCreations: [],
   };
 }
